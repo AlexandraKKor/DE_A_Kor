@@ -1,0 +1,217 @@
+CREATE SCHEMA IF NOT EXISTS DM;
+-- Создание таблицы DM_ACCOUNT_TURNOVER_F
+CREATE TABLE IF NOT EXISTS DM.DM_ACCOUNT_TURNOVER_F (
+    on_date DATE,
+    account_rk NUMERIC,
+    credit_amount NUMERIC(23,8),
+    credit_amount_rub NUMERIC(23,8),
+    debet_amount NUMERIC(23,8),
+    debet_amount_rub NUMERIC(23,8)
+);
+
+CREATE TABLE IF NOT EXISTS logs.LOGGING_TABLE (
+    log_id SERIAL PRIMARY KEY,
+    calculation_date DATE,
+    calculation_type VARCHAR(50),
+    start_time TIMESTAMP,
+    end_time TIMESTAMP
+);
+
+CREATE TABLE DM.DM_ACCOUNT_BALANCE_F (
+    ON_DATE DATE NOT NULL,
+    ACCOUNT_RK NUMERIC NOT NULL,
+    BALANCE_OUT FLOAT,
+    BALANCE_OUT_RUB FLOAT
+);
+
+
+
+
+-- Вставляем данные в таблицу DM_ACCOUNT_BALANCE_F
+INSERT INTO DM.DM_ACCOUNT_BALANCE_F (on_date, account_rk, balance_out, balance_out_rub)
+-- Выбираем данные из таблицы FT_BALANCE_F и вычисляем balance_out_rub
+SELECT fb."ON_DATE" as on_date, 
+       fb."ACCOUNT_RK",  
+       fb."BALANCE_OUT", 
+       fb."BALANCE_OUT" * COALESCE(er."REDUCED_COURCE", 1) as balance_out_rub
+FROM DS.FT_BALANCE_F fb
+-- Присоединяем таблицу MD_EXCHANGE_RATE_D для получения курса валюты
+LEFT JOIN (
+    SELECT "CURRENCY_RK","REDUCED_COURCE", "DATA_ACTUAL_DATE"
+    FROM DS.MD_EXCHANGE_RATE_D er
+    -- Выбираем последний доступный курс для каждой валюты
+    WHERE "DATA_ACTUAL_DATE" IN (
+        SELECT MAX("DATA_ACTUAL_DATE")
+        FROM DS.MD_EXCHANGE_RATE_D
+        WHERE "DATA_ACTUAL_DATE" <= er."DATA_ACTUAL_DATE"
+        GROUP BY "CURRENCY_RK"
+    )
+) er ON fb."CURRENCY_RK" = er."CURRENCY_RK"
+-- Фильтруем данные по дате '20171231'
+WHERE fb."ON_DATE" = '20171231';
+
+
+
+
+
+
+
+
+CREATE OR REPLACE PROCEDURE ds.fill_account_balance_f(i_OnDate DATE) AS $$
+DECLARE
+    v_account_rk INT;
+    v_currency_rk INT;
+    v_prev_balance NUMERIC;
+    v_balance_out NUMERIC;
+    v_balance_out_rub NUMERIC;
+    account_record RECORD;
+    v_currency_rate NUMERIC;
+    v_log_id INT;
+BEGIN
+	    -- Логирование начала выполнения процедуры
+    INSERT INTO logs.logging_table (calculation_date, calculation_type, start_time)
+    VALUES (i_OnDate, 'fill_account_balance_f', CURRENT_TIMESTAMP)
+    RETURNING log_id INTO v_log_id;
+
+    FOR account_record IN 
+        SELECT
+            acc."ACCOUNT_RK",
+            acc."CURRENCY_RK",
+            COALESCE(prev.balance_out, 0) AS prev_balance,
+            acc."CHAR_TYPE"
+        FROM
+            DS.MD_ACCOUNT_D acc
+            LEFT JOIN DM.DM_ACCOUNT_BALANCE_F prev ON acc."ACCOUNT_RK" = prev.account_rk AND prev.on_date = i_OnDate - 1
+        WHERE
+            i_OnDate BETWEEN acc."DATA_ACTUAL_DATE" AND acc."DATA_ACTUAL_END_DATE"
+    LOOP
+        v_account_rk := account_record."ACCOUNT_RK";
+        v_currency_rk := account_record."CURRENCY_RK";
+        v_prev_balance := account_record.prev_balance;
+
+        -- Получение курса валюты на дату i_OnDate из таблицы DS.MD_CURRENCY_D
+        SELECT 1 / (SELECT COUNT(*) FROM DS.MD_CURRENCY_D WHERE "CURRENCY_RK" = v_currency_rk AND "DATA_ACTUAL_DATE" <= i_OnDate) INTO v_currency_rate;
+
+        -- Логика расчета баланса
+        IF account_record."CHAR_TYPE" = 'А' THEN
+            v_balance_out := v_prev_balance + COALESCE((SELECT SUM(debet_amount) FROM DM.DM_ACCOUNT_TURNOVER_F WHERE account_rk = v_account_rk AND on_date = i_OnDate), 0) - COALESCE((SELECT SUM(credit_amount) FROM DM.DM_ACCOUNT_TURNOVER_F WHERE account_rk = v_account_rk AND on_date = i_OnDate), 0);
+        ELSIF account_record."CHAR_TYPE" = 'П' THEN
+            v_balance_out := v_prev_balance - COALESCE((SELECT SUM(debet_amount) FROM DM.DM_ACCOUNT_TURNOVER_F WHERE account_rk = v_account_rk AND on_date = i_OnDate), 0) + COALESCE((SELECT SUM(credit_amount) FROM DM.DM_ACCOUNT_TURNOVER_F WHERE account_rk = v_account_rk AND on_date = i_OnDate), 0);
+        END IF;
+
+        -- Расчет баланса в рублях
+        v_balance_out_rub := v_balance_out * v_currency_rate;
+
+        -- Вставка данных в таблицу DM.DM_ACCOUNT_BALANCE_F
+        INSERT INTO DM.DM_ACCOUNT_BALANCE_F (on_date, account_rk, balance_out, balance_out_rub)
+        VALUES (i_OnDate, v_account_rk, v_balance_out, v_balance_out_rub);
+            -- Логирование окончания выполнения процедуры
+        UPDATE logs.logging_table
+        SET end_time = CURRENT_TIMESTAMP
+        WHERE log_id = v_log_id;
+
+    END LOOP;
+END $$ LANGUAGE plpgsql;
+
+
+
+DO $$
+DECLARE
+    i_OnDate DATE;
+BEGIN
+    FOR i_OnDate IN SELECT generate_series('2018-01-01'::DATE, '2018-01-31'::DATE, '1 day'::INTERVAL) LOOP
+        CALL ds.fill_account_balance_f(i_OnDate);
+    END LOOP;
+END $$;
+
+
+
+
+
+
+
+
+
+
+
+
+
+CREATE OR REPLACE PROCEDURE ds.fill_account_turnover_f(i_OnDate DATE) AS 
+$$
+DECLARE
+    v_currency_rate FLOAT;
+    account_record RECORD;
+    account_cursor CURSOR FOR
+        SELECT DISTINCT debet_account_rk AS account_rk
+        FROM DS.FT_POSTING_F
+        WHERE oper_date = i_OnDate;
+BEGIN
+    -- Логирование начала выполнения процедуры
+    INSERT INTO logs.LOGGING_TABLE (calculation_date, calculation_type, start_time)
+    VALUES (i_OnDate, 'fill_account_turnover_f', CURRENT_TIMESTAMP);
+
+    OPEN account_cursor;
+    LOOP
+        FETCH account_cursor INTO account_record;
+        EXIT WHEN NOT FOUND;
+
+        -- Получение курса валюты на дату i_OnDate из таблицы DS.MD_EXCHANGE_RATE_D
+        SELECT COALESCE("REDUCED_COURCE", 1) INTO v_currency_rate
+        FROM ds.md_exchange_rate_d
+        WHERE "DATA_ACTUAL_DATE" <= i_OnDate
+        ORDER BY "DATA_ACTUAL_DATE" DESC
+        LIMIT 1;
+
+        -- Расчет credit_amount и credit_amount_rub
+        INSERT INTO DM.DM_ACCOUNT_TURNOVER_F (on_date, account_rk, credit_amount, credit_amount_rub)
+        SELECT i_OnDate, account_record.account_rk, SUM(credit_amount), SUM(credit_amount) * v_currency_rate
+        FROM DS.FT_POSTING_F
+        WHERE oper_date = i_OnDate AND credit_account_rk = account_record.account_rk
+        GROUP BY account_record.account_rk;
+
+        -- Расчет debet_amount и debet_amount_rub
+        INSERT INTO DM.DM_ACCOUNT_TURNOVER_F (on_date, account_rk, debet_amount, debet_amount_rub)
+        SELECT i_OnDate, account_record.account_rk, SUM(debet_amount), SUM(debet_amount) * v_currency_rate
+        FROM DS.FT_POSTING_F
+        WHERE oper_date = i_OnDate AND debet_account_rk = account_record.account_rk
+        GROUP BY account_record.account_rk;
+    END LOOP;
+
+    CLOSE account_cursor;
+
+    -- Логирование окончания выполнения процедуры
+    UPDATE logs.LOGGING_TABLE
+    SET end_time = CURRENT_TIMESTAMP
+    WHERE calculation_date = i_OnDate AND calculation_type = 'fill_account_turnover_f';
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+
+
+
+DO $$
+DECLARE
+    date_range DATE[] := ARRAY(SELECT generate_series('2018-01-01'::DATE, '2018-01-31'::DATE, '1 day'::INTERVAL)::DATE);
+    i INT;
+BEGIN
+    FOR i IN 1..array_length(date_range, 1) LOOP
+        EXECUTE 'CALL ds.fill_account_turnover_f($1)' USING date_range[i];
+    END LOOP;
+END $$;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,20 @@
+
+COPY (SELECT * FROM dm.dm_f101_round_f) TO 'C:\Users\Alexandra\Desktop\neo_pr\dm.fill_f101_round_f1.csv' WITH CSV HEADER;
+
+Команда копирует данные из таблицы dm.dm_f101_round_f в файл CSV с указанным путем 'C:\Users\Alexandra\Desktop\neo_pr\dm.fill_f101_round_f1.csv'.
+ (SELECT * FROM dm.dm_f101_round_f) - выбирает все данные из таблицы dm.dm_f101_round_f для экспорта.
+- TO 'C:\Users\Alexandra\Desktop\neo_pr\dm.fill_f101_round_f1.csv' указывает путь и имя файла, в который будут экспортированы данные.
+- WITH CSV HEADER указывает, что данные будут экспортированы в формате CSV с первой строкой в качестве заголовков столбцов.
+
+COPY dm.dm_f101_round_f_v2 FROM 'C:\Users\Alexandra\Desktop\neo_pr\dm.fill_f101_round_f_v2.csv' WITH CSV HEADER;
+
+Команда копирует данные из файла CSV с указанным путем 'C:\Users\Alexandra\Desktop\neo_pr\dm.fill_f101_round_f.csv' в таблицу dm.dm_f101_round_f_v2.
+- dm.dm_f101_round_f _v2- это целевая таблица, в которую будут импортированы данные.
+- FROM 'C:\Users\Alexandra\Desktop\neo_pr\dm.fill_f101_round_f_v2.csv' указывает путь и имя файла, из которого будут импортированы данные.
+- WITH CSV HEADER указывает, что данные в файле CSV содержат заголовки столбцов.
+
+
+CREATE TABLE dm.dm_f101_round_f _v2 AS
+SELECT * FROM dm.dm_f101_round_f;
+
+---создание копии таблицы 

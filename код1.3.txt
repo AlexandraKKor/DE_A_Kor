@@ -1,0 +1,145 @@
+CREATE TABLE DM.DM_F101_ROUND_F (
+    FROM_DATE DATE,
+    TO_DATE DATE,
+    CHAPTER CHAR(1),
+    LEDGER_ACCOUNT CHAR(5),
+    CHARACTERISTIC CHAR(1),
+    BALANCE_IN_RUB NUMERIC(23,8),
+    R_BALANCE_IN_RUB NUMERIC(23,8),
+    BALANCE_IN_VAL NUMERIC(23,8),
+    R_BALANCE_IN_VAL NUMERIC(23,8),
+    BALANCE_IN_TOTAL NUMERIC(23,8),
+    R_BALANCE_IN_TOTAL NUMERIC(23,8),
+    TURN_DEB_RUB NUMERIC(23,8),
+    R_TURN_DEB_RUB NUMERIC(23,8),
+    TURN_DEB_VAL NUMERIC(23,8),
+    R_TURN_DEB_VAL NUMERIC(23,8),
+    TURN_DEB_TOTAL NUMERIC(23,8),
+    R_TURN_DEB_TOTAL NUMERIC(23,8),
+    TURN_CRE_RUB NUMERIC(23,8),
+    R_TURN_CRE_RUB NUMERIC(23,8),
+    TURN_CRE_VAL NUMERIC(23,8),
+    R_TURN_CRE_VAL NUMERIC(23,8),
+    TURN_CRE_TOTAL NUMERIC(23,8),
+    R_TURN_CRE_TOTAL NUMERIC(23,8),
+    BALANCE_OUT_RUB NUMERIC(23,8),
+    R_BALANCE_OUT_RUB NUMERIC(23,8),
+    BALANCE_OUT_VAL NUMERIC(23,8),
+    R_BALANCE_OUT_VAL NUMERIC(23,8),
+    BALANCE_OUT_TOTAL NUMERIC(23,8),
+    R_BALANCE_OUT_TOTAL NUMERIC(23,8),
+    "DATE" DATE
+);
+
+CREATE OR REPLACE FUNCTION dm.fill_f101_round_f(i_OnDate DATE)
+RETURNS VOID AS $$
+DECLARE
+    v_log_id INT;
+BEGIN
+-- Логирование старта выполнения функции
+INSERT INTO logs.LOGGING_TABLE (calculation_date, calculation_type, start_time)
+VALUES (i_OnDate, 'F101_ROUND_F', CURRENT_TIMESTAMP)
+RETURNING log_id INTO v_log_id;
+    -- Основная часть функции
+    INSERT INTO DM.DM_F101_ROUND_F (
+        FROM_DATE, 
+        TO_DATE, 
+        CHAPTER, 
+        LEDGER_ACCOUNT, 
+        CHARACTERISTIC, 
+        BALANCE_IN_RUB, 
+        R_BALANCE_IN_RUB, 
+        BALANCE_IN_VAL, 
+        R_BALANCE_IN_VAL, 
+        BALANCE_IN_TOTAL, 
+        R_BALANCE_IN_TOTAL, 
+        TURN_DEB_RUB, 
+        R_TURN_DEB_RUB, 
+        TURN_DEB_VAL, 
+        R_TURN_DEB_VAL, 
+        TURN_DEB_TOTAL, 
+        R_TURN_DEB_TOTAL, 
+        TURN_CRE_RUB, 
+        R_TURN_CRE_RUB, 
+        TURN_CRE_VAL, 
+        R_TURN_CRE_VAL, 
+        TURN_CRE_TOTAL, 
+        R_TURN_CRE_TOTAL, 
+        BALANCE_OUT_RUB, 
+        R_BALANCE_OUT_RUB, 
+        BALANCE_OUT_VAL, 
+        R_BALANCE_OUT_VAL, 
+        BALANCE_OUT_TOTAL
+    )
+    SELECT
+        i_OnDate AS FROM_DATE,
+        i_OnDate AS TO_DATE,
+        las."CHAPTER",
+        SUBSTR(ad."ACCOUNT_NUMBER", 1, 5),
+        ad."CHAR_TYPE",
+        COALESCE(dab.balance_out_rub, 0) AS BALANCE_IN_RUB,
+        0 AS R_BALANCE_IN_RUB,
+        COALESCE(dab.balance_out, 0) AS BALANCE_IN_VAL,
+        0 AS R_BALANCE_IN_VAL,
+        COALESCE(dab.balance_out, 0) AS BALANCE_IN_TOTAL,
+        0 AS R_BALANCE_IN_TOTAL,
+        COALESCE(SUM(CASE WHEN ad."CURRENCY_CODE"::character varying IN ('810', '643') THEN atf1.debet_amount ELSE 0 END), 0) AS TURN_DEB_RUB,
+        0 AS R_TURN_DEB_RUB,
+        COALESCE(SUM(CASE WHEN ad."CURRENCY_CODE"::character varying NOT IN ('810', '643') THEN atf2.debet_amount ELSE 0 END), 0) AS TURN_DEB_VAL,
+        0 AS R_TURN_DEB_VAL,
+        COALESCE(SUM(atf1.debet_amount), 0) AS TURN_DEB_TOTAL,
+        0 AS R_TURN_DEB_TOTAL,
+        COALESCE(SUM(CASE WHEN ad."CURRENCY_CODE" IN ('810', '643') THEN atf1.debet_amount ELSE 0 END), 0) AS TURN_CRE_RUB,
+        0 AS R_TURN_CRE_RUB,
+        COALESCE(SUM(CASE WHEN ad."CURRENCY_CODE" NOT IN ('810', '643') THEN atf2.debet_amount ELSE 0 END), 0) AS TURN_CRE_VAL,
+        0 AS R_TURN_CRE_VAL,
+        COALESCE(SUM(atf2.credit_amount), 0) AS TURN_CRE_TOTAL,
+        0 AS R_TURN_CRE_TOTAL,
+        COALESCE(dab.balance_out_rub, 0) AS BALANCE_OUT_RUB,
+        0 AS R_BALANCE_OUT_RUB,
+        COALESCE(dab.balance_out, 0) AS BALANCE_OUT_VAL,
+        0 AS R_BALANCE_OUT_VAL,
+        COALESCE(dab.balance_out, 0) AS BALANCE_OUT_TOTAL
+    FROM DS.MD_ACCOUNT_D ad
+    JOIN DS.FT_POSTING_F atf1 ON ad."ACCOUNT_NUMBER" = CAST(atf1.debet_account_rk AS character varying)
+    JOIN DS.FT_POSTING_F atf2 ON ad."ACCOUNT_NUMBER" = CAST(atf2.debet_account_rk AS character varying)    
+    JOIN DS.MD_LEDGER_ACCOUNT_S las ON CAST(SUBSTR(ad."ACCOUNT_NUMBER", 1, 5) AS INTEGER) = las."LEDGER_ACCOUNT"
+    LEFT JOIN (
+        SELECT
+            dab.account_rk,
+            SUM(dab.balance_out_rub) AS balance_out_rub,
+            SUM(dab.balance_out) AS balance_out
+        FROM dm.dm_account_balance_f dab
+        WHERE dab.on_date = i_OnDate
+        GROUP BY dab.account_rk
+    ) dab ON ad."ACCOUNT_RK" = dab.account_rk
+    WHERE atf1.oper_date = i_OnDate
+    AND atf2.oper_date = i_OnDate
+    GROUP BY i_OnDate, las."CHAPTER", SUBSTR(ad."ACCOUNT_NUMBER", 1, 5), ad."CHAR_TYPE", dab.balance_out_rub, dab.balance_out;
+            -- Логирование окончания выполнения процедуры
+        UPDATE logs.logging_table
+        SET end_time = CURRENT_TIMESTAMP
+        WHERE log_id = v_log_id;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$
+DECLARE
+    curr_date DATE := '2023-01-01'; -- начальная дата
+BEGIN
+    WHILE curr_date <= '2023-01-31' LOOP -- конечная дата
+        PERFORM dm.fill_f101_round_f(curr_date);
+        curr_date := curr_date + INTERVAL '1 day'; -- увеличиваем дату на 1 день
+    END LOOP;
+END $$;
+
+
+
+
+
+
+
+
+
+
+
